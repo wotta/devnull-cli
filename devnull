@@ -1,0 +1,101 @@
+#!/usr/bin/env zsh
+#
+# devnull: post to /dev/null (https://dev-null.sh) without remembering the curl incantation.
+#
+#   devnull It was DNS.                     plain commit (quotes optional)
+#   devnull -r 0be0130 Agreed!              reply to a commit
+#   devnull ~/Desktop/shipped.png Shipped!  drag images anywhere into the command (up to 3)
+#   devnull                                 interactive: drop images, then type the message
+#
+# Any argument that is an existing .png/.jpg/.jpeg/.webp/.heic/.heif file is attached as an
+# image; everything else becomes the message. HEIC/HEIF is converted to JPEG and anything over
+# 1600px is scaled down first (via sips).
+
+emulate -L zsh
+setopt extended_glob
+
+usage() {
+  print -u2 "usage: devnull [-r|--reply <hash>] [image ...] [message ...]"
+  exit 1
+}
+
+is_image() {
+  [[ -f $1 && ${1:l} == *.(png|jpg|jpeg|webp|heic|heif) ]]
+}
+
+reply=""
+images=()
+words=()
+
+while (( $# )); do
+  case $1 in
+    -r|--reply) [[ -n ${2:-} ]] || usage; reply=$2; shift 2 ;;
+    -i|--image) [[ -n ${2:-} ]] || usage; images+=("${2:a}"); shift 2 ;;
+    -h|--help) usage ;;
+    --) shift; words+=("$@"); break ;;
+    *)
+      if is_image "$1"; then
+        images+=("${1:a}")
+      else
+        words+=("$1")
+      fi
+      shift
+      ;;
+  esac
+done
+
+# No message given: ask for one, and offer to take dropped images first.
+if (( ! ${#words} )); then
+  if (( ! ${#images} )); then
+    read -r "dropped?Drop images (Enter to skip): " < /dev/tty
+    # Terminals paste dropped files shell-escaped (\ or quotes): split and unquote like zsh would.
+    for path_arg in ${(Q)${(z)dropped}}; do
+      if is_image "$path_arg"; then
+        images+=("${path_arg:a}")
+      else
+        print -u2 "devnull: skipping $path_arg (not a .png, .jpg, .webp or .heic file)"
+      fi
+    done
+  fi
+  read -r "message?Message: " < /dev/tty
+  words=("$message")
+fi
+
+(( ${#images} <= 3 )) || { print -u2 "devnull: up to 3 images per commit."; exit 1 }
+
+# /dev/null only takes JPEG, PNG and WebP and rejects large dimensions: convert HEIC/HEIF to
+# JPEG and scale anything over MAX_SIDE px down, in a throwaway directory. Originals stay untouched.
+MAX_SIDE=1600
+for i in {1..${#images}}; do
+  src=${images[i]}
+  dims=(${(f)"$(sips -g pixelWidth -g pixelHeight "$src" 2> /dev/null | awk '/pixel/ { print $2 }')"})
+  longest=$(( ${dims[1]:-0} > ${dims[2]:-0} ? ${dims[1]:-0} : ${dims[2]:-0} ))
+  is_heic=0; [[ ${src:l} == *.(heic|heif) ]] && is_heic=1
+  (( is_heic || longest > MAX_SIDE )) || continue
+
+  if [[ -z ${tmp_dir:-} ]]; then
+    tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/devnull-img.XXXXXX") || exit 1
+    trap 'rm -rf -- "$tmp_dir"' EXIT
+  fi
+
+  # Keep PNG as PNG (screenshots, transparency); everything else becomes JPEG.
+  if [[ ${src:l} == *.png ]]; then
+    format=png; out="$tmp_dir/$i-${${src:t}:r}.png"
+  else
+    format=jpeg; out="$tmp_dir/$i-${${src:t}:r}.jpg"
+  fi
+  sips_args=(-s format $format)
+  [[ $format == jpeg ]] && sips_args+=(-s formatOptions 85)
+  (( longest > MAX_SIDE )) && sips_args+=(-Z $MAX_SIDE)
+
+  sips "${sips_args[@]}" "$src" --out "$out" > /dev/null 2>&1 \
+    || { print -u2 "devnull: could not prepare $src for upload."; exit 1 }
+  images[i]=$out
+done
+
+args=()
+[[ -n $reply ]] && args+=(--reply "$reply")
+for image in $images; do args+=(--image "$image"); done
+args+=(-- "${(j: :)words}")
+
+curl -fsSL https://dev-null.sh/commit | bash -s -- "${args[@]}"

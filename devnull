@@ -5,18 +5,21 @@
 #   devnull It was DNS.                     plain commit (quotes optional)
 #   devnull -r 0be0130 Agreed!              reply to a commit
 #   devnull ~/Desktop/shipped.png Shipped!  drag images anywhere into the command (up to 3)
+#   devnull -c Shipped!                     attach the screenshot on the clipboard (WSL)
 #   devnull                                 interactive: drop images, then type the message
 #
 # Any argument that is an existing .png/.jpg/.jpeg/.webp/.heic/.heif file is attached as an
 # image; everything else becomes the message. HEIC/HEIF is converted to JPEG and anything over
 # 1600px is scaled down first (via sips on macOS, ImageMagick elsewhere).
 #
+# Under WSL, interactive mode also offers to attach a screenshot found on the Windows clipboard.
+#
 # Written for the bash 3.2 that ships with macOS.
 
 MAX_SIDE=1600
 
 usage() {
-  echo "usage: devnull [-r|--reply <hash>] [image ...] [message ...]" >&2
+  echo "usage: devnull [-r|--reply <hash>] [-c|--clipboard] [image ...] [message ...]" >&2
   exit 1
 }
 
@@ -35,6 +38,21 @@ is_image() {
     *.png | *.jpg | *.jpeg | *.webp | *.heic | *.heif) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+# Windows Terminal pastes Windows paths, usually quoted ("C:\Users\me\shot.png"). Strip leftover
+# quotes and, under WSL, translate the path to its Linux form (/mnt/c/Users/me/shot.png).
+local_path() {
+  local path=$1
+  case "$path" in
+    \"*\" | \'*\') path=${path:1:${#path}-2} ;;
+  esac
+  case "$path" in
+    [A-Za-z]:\\* | [A-Za-z]:/* | \\\\*)
+      command -v wslpath > /dev/null && path=$(wslpath -u "$path" 2> /dev/null || printf '%s' "$path")
+      ;;
+  esac
+  printf '%s' "$path"
 }
 
 # The tool that reads and writes images: sips on macOS, ImageMagick (7, then 6) elsewhere.
@@ -81,19 +99,56 @@ convert_image() {
   esac > /dev/null 2>&1
 }
 
+# Throwaway directory for converted images, removed on exit. Created on first use.
+tmp_dir=""
+make_tmp_dir() {
+  [ -z "$tmp_dir" ] || return 0
+  tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/devnull-img.XXXXXX") || exit 1
+  trap 'rm -rf -- "$tmp_dir"' EXIT
+}
+
+# Saves the screenshot on the Windows clipboard to $tmp_dir/clipboard.png, scaled down to
+# MAX_SIDE px so it needs no ImageMagick, and fails when the clipboard holds no image. WSL only.
+# Windows Terminal swallows Ctrl+V when the clipboard holds an image instead of text, so the
+# paste never reaches us: we have to go and look.
+clipboard_image() {
+  command -v powershell.exe > /dev/null || return 1
+  make_tmp_dir
+  powershell.exe -NoProfile -NonInteractive -STA -Command '
+    Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+    $img = [System.Windows.Forms.Clipboard]::GetImage()
+    if (-not $img) { exit 1 }
+    $scale = '"$MAX_SIDE"' / [Math]::Max($img.Width, $img.Height)
+    if ($scale -lt 1) {
+      $small = New-Object System.Drawing.Bitmap ([int]($img.Width * $scale)), ([int]($img.Height * $scale))
+      $g = [System.Drawing.Graphics]::FromImage($small)
+      $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+      $g.DrawImage($img, 0, 0, $small.Width, $small.Height)
+      $img = $small
+    }
+    $png = New-Object System.IO.MemoryStream
+    $img.Save($png, [System.Drawing.Imaging.ImageFormat]::Png)
+    [Convert]::ToBase64String($png.ToArray())
+  ' < /dev/null 2> /dev/null | tr -d '\r' | base64 -d > "$tmp_dir/clipboard.png" 2> /dev/null
+  [ -s "$tmp_dir/clipboard.png" ]
+}
+
 reply=""
+from_clipboard=0
 images=()
 words=()
 
 while [ $# -gt 0 ]; do
   case "$1" in
     -r | --reply) [ -n "${2:-}" ] || usage; reply=$2; shift 2 ;;
-    -i | --image) [ -n "${2:-}" ] || usage; images+=("$2"); shift 2 ;;
+    -c | --clipboard) from_clipboard=1; shift ;;
+    -i | --image) [ -n "${2:-}" ] || usage; images+=("$(local_path "$2")"); shift 2 ;;
     -h | --help) usage ;;
     --) shift; words+=("$@"); break ;;
     *)
-      if is_image "$1"; then
-        images+=("$1")
+      path=$(local_path "$1")
+      if is_image "$path"; then
+        images+=("$path")
       else
         words+=("$1")
       fi
@@ -102,13 +157,28 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-# No message given: ask for one, and offer to take dropped images first.
+if [ "$from_clipboard" -eq 1 ]; then
+  clipboard_image || fail "no screenshot on the clipboard (only supported under WSL)."
+  images+=("$tmp_dir/clipboard.png")
+fi
+
+# No message given: ask for one, and offer to take a clipboard screenshot or dropped images first.
 if [ ${#words[@]} -eq 0 ]; then
+  if [ ${#images[@]} -eq 0 ] && clipboard_image; then
+    read -r -p "Attach the screenshot on your clipboard? [Y/n] " answer < /dev/tty
+    case "$(lower "$answer")" in
+      n | no) ;;
+      *) images+=("$tmp_dir/clipboard.png") ;;
+    esac
+  fi
   if [ ${#images[@]} -eq 0 ]; then
     read -r -p "Drop images (Enter to skip): " dropped < /dev/tty
     # Terminals paste dropped files shell-escaped (\ or quotes). xargs splits and unquotes them
     # the same way, without ever executing the pasted text.
     while IFS= read -r dropped_path; do
+      # GNU xargs runs once even for empty input, handing us an empty line.
+      [ -n "$dropped_path" ] || continue
+      dropped_path=$(local_path "$dropped_path")
       if is_image "$dropped_path"; then
         images+=("$dropped_path")
       else
@@ -124,7 +194,6 @@ fi
 
 # /dev/null only takes JPEG, PNG and WebP and rejects large dimensions: convert HEIC/HEIF to
 # JPEG and scale anything over MAX_SIDE px down, in a throwaway directory. Originals stay untouched.
-tmp_dir=""
 for i in "${!images[@]}"; do
   src=${images[$i]}
   src_lower=$(lower "$src")
@@ -139,10 +208,7 @@ for i in "${!images[@]}"; do
 
   [ -n "$image_tool" ] || fail "$src is HEIC/HEIF: install ImageMagick so it can be converted to JPEG."
 
-  if [ -z "$tmp_dir" ]; then
-    tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/devnull-img.XXXXXX") || exit 1
-    trap 'rm -rf -- "$tmp_dir"' EXIT
-  fi
+  make_tmp_dir
 
   # Keep PNG as PNG (screenshots, transparency); everything else becomes JPEG.
   name=$(basename "$src")

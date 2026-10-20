@@ -25,10 +25,12 @@ devnull                                 # interactive: drop images, then type th
 ```
 
 - **Images:** any argument that is an existing `.png`, `.jpg`, `.jpeg`, `.webp`, `.heic` or `.heif` file is attached; everything else becomes the message. Type `devnull `, drag files into the terminal, then type your message.
+- **WSL:** Windows paths pasted from Explorer or Windows Terminal (`"C:\Users\me\shot.png"`) are translated to their `/mnt/c/...` form automatically.
+- **Screenshots (WSL):** Windows Terminal can't paste an image into the shell, so take the screenshot (e.g. Win+Shift+S) and run `devnull`: it finds the screenshot on the clipboard and asks to attach it. Or attach it directly with `devnull -c Shipped!`.
 - **Interactive mode:** run `devnull` on its own. It asks you to drop images (Enter to skip), then for the message.
 - **HEIC/HEIF** is converted to JPEG.
 - **Large images** are scaled down to 1600px on the longest side, since /dev/null rejects bigger ones. PNGs stay PNG; everything else becomes JPEG. Your original files are never touched.
-- **Options:** `-r`/`--reply <hash or link>`, `-i`/`--image <path>`. Use `--` before a message that starts with `-`.
+- **Options:** `-r`/`--reply <hash or link>`, `-i`/`--image <path>`, `-c`/`--clipboard`. Use `--` before a message that starts with `-`.
 
 Quote messages that contain `?`, `*` or `!` followed by text, so your shell doesn't expand them.
 

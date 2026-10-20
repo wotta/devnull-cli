@@ -13,7 +13,7 @@ chmod +x ~/.local/bin/devnull
 
 Any directory on your `PATH` works instead of `~/.local/bin`.
 
-Requires zsh. Image conversion and resizing use `sips`, which ships with macOS.
+Requires bash (the 3.2 that ships with macOS is fine). Image conversion and resizing use `sips`, which ships with macOS.
 
 ## Usage
 
@@ -30,7 +30,7 @@ devnull                                 # interactive: drop images, then type th
 - **Large images** are scaled down to 1600px on the longest side, since /dev/null rejects bigger ones. PNGs stay PNG; everything else becomes JPEG. Your original files are never touched.
 - **Options:** `-r`/`--reply <hash or link>`, `-i`/`--image <path>`. Use `--` before a message that starts with `-`.
 
-Quote messages that contain `?`, `*` or `!` followed by text, so zsh doesn't expand them.
+Quote messages that contain `?`, `*` or `!` followed by text, so your shell doesn't expand them.
 
 ## License
 

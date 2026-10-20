@@ -1,4 +1,4 @@
-#!/usr/bin/env zsh
+#!/usr/bin/env bash
 #
 # devnull: post to /dev/null (https://dev-null.sh) without remembering the curl incantation.
 #
@@ -10,32 +10,46 @@
 # Any argument that is an existing .png/.jpg/.jpeg/.webp/.heic/.heif file is attached as an
 # image; everything else becomes the message. HEIC/HEIF is converted to JPEG and anything over
 # 1600px is scaled down first (via sips).
+#
+# Written for the bash 3.2 that ships with macOS.
 
-emulate -L zsh
-setopt extended_glob
+MAX_SIDE=1600
 
 usage() {
-  print -u2 "usage: devnull [-r|--reply <hash>] [image ...] [message ...]"
+  echo "usage: devnull [-r|--reply <hash>] [image ...] [message ...]" >&2
   exit 1
 }
 
+fail() {
+  echo "devnull: $*" >&2
+  exit 1
+}
+
+lower() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
 is_image() {
-  [[ -f $1 && ${1:l} == *.(png|jpg|jpeg|webp|heic|heif) ]]
+  [ -f "$1" ] || return 1
+  case "$(lower "$1")" in
+    *.png | *.jpg | *.jpeg | *.webp | *.heic | *.heif) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 reply=""
 images=()
 words=()
 
-while (( $# )); do
-  case $1 in
-    -r|--reply) [[ -n ${2:-} ]] || usage; reply=$2; shift 2 ;;
-    -i|--image) [[ -n ${2:-} ]] || usage; images+=("${2:a}"); shift 2 ;;
-    -h|--help) usage ;;
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -r | --reply) [ -n "${2:-}" ] || usage; reply=$2; shift 2 ;;
+    -i | --image) [ -n "${2:-}" ] || usage; images+=("$2"); shift 2 ;;
+    -h | --help) usage ;;
     --) shift; words+=("$@"); break ;;
     *)
       if is_image "$1"; then
-        images+=("${1:a}")
+        images+=("$1")
       else
         words+=("$1")
       fi
@@ -45,57 +59,65 @@ while (( $# )); do
 done
 
 # No message given: ask for one, and offer to take dropped images first.
-if (( ! ${#words} )); then
-  if (( ! ${#images} )); then
-    read -r "dropped?Drop images (Enter to skip): " < /dev/tty
-    # Terminals paste dropped files shell-escaped (\ or quotes): split and unquote like zsh would.
-    for path_arg in ${(Q)${(z)dropped}}; do
-      if is_image "$path_arg"; then
-        images+=("${path_arg:a}")
+if [ ${#words[@]} -eq 0 ]; then
+  if [ ${#images[@]} -eq 0 ]; then
+    read -r -p "Drop images (Enter to skip): " dropped < /dev/tty
+    # Terminals paste dropped files shell-escaped (\ or quotes). xargs splits and unquotes them
+    # the same way, without ever executing the pasted text.
+    while IFS= read -r dropped_path; do
+      if is_image "$dropped_path"; then
+        images+=("$dropped_path")
       else
-        print -u2 "devnull: skipping $path_arg (not a .png, .jpg, .webp or .heic file)"
+        echo "devnull: skipping $dropped_path (not a .png, .jpg, .webp or .heic file)" >&2
       fi
-    done
+    done < <(printf '%s' "$dropped" | xargs -n 1 printf '%s\n')
   fi
-  read -r "message?Message: " < /dev/tty
+  read -r -p "Message: " message < /dev/tty
   words=("$message")
 fi
 
-(( ${#images} <= 3 )) || { print -u2 "devnull: up to 3 images per commit."; exit 1 }
+[ ${#images[@]} -le 3 ] || fail "up to 3 images per commit."
 
 # /dev/null only takes JPEG, PNG and WebP and rejects large dimensions: convert HEIC/HEIF to
 # JPEG and scale anything over MAX_SIDE px down, in a throwaway directory. Originals stay untouched.
-MAX_SIDE=1600
-for i in {1..${#images}}; do
-  src=${images[i]}
-  dims=(${(f)"$(sips -g pixelWidth -g pixelHeight "$src" 2> /dev/null | awk '/pixel/ { print $2 }')"})
-  longest=$(( ${dims[1]:-0} > ${dims[2]:-0} ? ${dims[1]:-0} : ${dims[2]:-0} ))
-  is_heic=0; [[ ${src:l} == *.(heic|heif) ]] && is_heic=1
-  (( is_heic || longest > MAX_SIDE )) || continue
+tmp_dir=""
+for i in "${!images[@]}"; do
+  src=${images[$i]}
+  src_lower=$(lower "$src")
 
-  if [[ -z ${tmp_dir:-} ]]; then
+  longest=$(sips -g pixelWidth -g pixelHeight "$src" 2> /dev/null \
+    | awk '/pixel(Width|Height)/ { if ($2 > max) max = $2 } END { print max + 0 }')
+
+  case "$src_lower" in
+    *.heic | *.heif) is_heic=1 ;;
+    *) is_heic=0 ;;
+  esac
+  [ "$is_heic" -eq 1 ] || [ "$longest" -gt "$MAX_SIDE" ] || continue
+
+  if [ -z "$tmp_dir" ]; then
     tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/devnull-img.XXXXXX") || exit 1
     trap 'rm -rf -- "$tmp_dir"' EXIT
   fi
 
   # Keep PNG as PNG (screenshots, transparency); everything else becomes JPEG.
-  if [[ ${src:l} == *.png ]]; then
-    format=png; out="$tmp_dir/$i-${${src:t}:r}.png"
-  else
-    format=jpeg; out="$tmp_dir/$i-${${src:t}:r}.jpg"
-  fi
-  sips_args=(-s format $format)
-  [[ $format == jpeg ]] && sips_args+=(-s formatOptions 85)
-  (( longest > MAX_SIDE )) && sips_args+=(-Z $MAX_SIDE)
+  name=$(basename "$src")
+  name=${name%.*}
+  case "$src_lower" in
+    *.png) sips_args=(-s format png); out="$tmp_dir/$i-$name.png" ;;
+    *) sips_args=(-s format jpeg -s formatOptions 85); out="$tmp_dir/$i-$name.jpg" ;;
+  esac
+  [ "$longest" -gt "$MAX_SIDE" ] && sips_args+=(-Z "$MAX_SIDE")
 
   sips "${sips_args[@]}" "$src" --out "$out" > /dev/null 2>&1 \
-    || { print -u2 "devnull: could not prepare $src for upload."; exit 1 }
-  images[i]=$out
+    || fail "could not prepare $src for upload."
+  images[$i]=$out
 done
 
 args=()
-[[ -n $reply ]] && args+=(--reply "$reply")
-for image in $images; do args+=(--image "$image"); done
-args+=(-- "${(j: :)words}")
+[ -n "$reply" ] && args+=(--reply "$reply")
+for image in ${images[@]+"${images[@]}"}; do
+  args+=(--image "$image")
+done
+args+=(-- "${words[*]}")
 
 curl -fsSL https://dev-null.sh/commit | bash -s -- "${args[@]}"

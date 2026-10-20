@@ -13,7 +13,7 @@ chmod +x ~/.local/bin/devnull
 
 Any directory on your `PATH` works instead of `~/.local/bin`.
 
-Requires bash (the 3.2 that ships with macOS is fine). Image conversion and resizing use `sips`, which ships with macOS.
+Requires bash (the 3.2 that ships with macOS is fine). Image conversion and resizing use `sips` on macOS and fall back to [ImageMagick](https://imagemagick.org) (6 or 7) elsewhere, e.g. Linux or WSL. Without either, images that need no changes still upload; HEIC needs one of them, and its HEIC support (libheif).
 
 ## Usage
 

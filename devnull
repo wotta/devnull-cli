@@ -9,7 +9,7 @@
 #
 # Any argument that is an existing .png/.jpg/.jpeg/.webp/.heic/.heif file is attached as an
 # image; everything else becomes the message. HEIC/HEIF is converted to JPEG and anything over
-# 1600px is scaled down first (via sips).
+# 1600px is scaled down first (via sips on macOS, ImageMagick elsewhere).
 #
 # Written for the bash 3.2 that ships with macOS.
 
@@ -35,6 +35,50 @@ is_image() {
     *.png | *.jpg | *.jpeg | *.webp | *.heic | *.heif) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+# The tool that reads and writes images: sips on macOS, ImageMagick (7, then 6) elsewhere.
+if command -v sips > /dev/null; then
+  image_tool=sips
+elif command -v magick > /dev/null; then
+  image_tool=magick
+elif command -v convert > /dev/null && command -v identify > /dev/null; then
+  image_tool=imagemagick6
+else
+  image_tool=""
+fi
+
+# Prints the longest side of an image in pixels, or 0 when it can't be read.
+longest_side() {
+  case "$image_tool" in
+    sips) sips -g pixelWidth -g pixelHeight "$1" 2> /dev/null | awk '/pixel(Width|Height)/ { print $2 }' ;;
+    magick) magick identify -format '%w\n%h\n' "$1[0]" 2> /dev/null ;;
+    imagemagick6) identify -format '%w\n%h\n' "$1[0]" 2> /dev/null ;;
+  esac | awk '{ if ($1 > max) max = $1 } END { print max + 0 }'
+}
+
+# convert_image <source> <output> <png|jpeg> <scale down: 0|1>
+convert_image() {
+  local args
+  case "$image_tool" in
+    sips)
+      args=(-s format "$3")
+      [ "$3" = jpeg ] && args+=(-s formatOptions 85)
+      [ "$4" -eq 1 ] && args+=(-Z "$MAX_SIDE")
+      sips "${args[@]}" "$1" --out "$2"
+      ;;
+    magick | imagemagick6)
+      args=("$1[0]" -auto-orient)
+      [ "$4" -eq 1 ] && args+=(-resize "${MAX_SIDE}x${MAX_SIDE}>")
+      [ "$3" = jpeg ] && args+=(-quality 85)
+      if [ "$image_tool" = magick ]; then
+        magick "${args[@]}" "$2"
+      else
+        convert "${args[@]}" "$2"
+      fi
+      ;;
+    *) return 1 ;;
+  esac > /dev/null 2>&1
 }
 
 reply=""
@@ -85,14 +129,15 @@ for i in "${!images[@]}"; do
   src=${images[$i]}
   src_lower=$(lower "$src")
 
-  longest=$(sips -g pixelWidth -g pixelHeight "$src" 2> /dev/null \
-    | awk '/pixel(Width|Height)/ { if ($2 > max) max = $2 } END { print max + 0 }')
+  longest=$(longest_side "$src")
 
   case "$src_lower" in
     *.heic | *.heif) is_heic=1 ;;
     *) is_heic=0 ;;
   esac
   [ "$is_heic" -eq 1 ] || [ "$longest" -gt "$MAX_SIDE" ] || continue
+
+  [ -n "$image_tool" ] || fail "$src is HEIC/HEIF: install ImageMagick so it can be converted to JPEG."
 
   if [ -z "$tmp_dir" ]; then
     tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/devnull-img.XXXXXX") || exit 1
@@ -103,13 +148,17 @@ for i in "${!images[@]}"; do
   name=$(basename "$src")
   name=${name%.*}
   case "$src_lower" in
-    *.png) sips_args=(-s format png); out="$tmp_dir/$i-$name.png" ;;
-    *) sips_args=(-s format jpeg -s formatOptions 85); out="$tmp_dir/$i-$name.jpg" ;;
+    *.png) format=png; out="$tmp_dir/$i-$name.png" ;;
+    *) format=jpeg; out="$tmp_dir/$i-$name.jpg" ;;
   esac
-  [ "$longest" -gt "$MAX_SIDE" ] && sips_args+=(-Z "$MAX_SIDE")
+  scale_down=0
+  [ "$longest" -gt "$MAX_SIDE" ] && scale_down=1
 
-  sips "${sips_args[@]}" "$src" --out "$out" > /dev/null 2>&1 \
-    || fail "could not prepare $src for upload."
+  if ! convert_image "$src" "$out" "$format" "$scale_down"; then
+    [ "$is_heic" -eq 1 ] && [ "$image_tool" != sips ] \
+      && fail "could not convert $src: your ImageMagick may lack HEIC support (libheif)."
+    fail "could not prepare $src for upload."
+  fi
   images[$i]=$out
 done
 
